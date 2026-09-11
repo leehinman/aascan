@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/leehinman/aascan/api"
 	"github.com/leehinman/aascan/download"
 )
@@ -75,11 +77,11 @@ func (i packageItem) FilterValue() string { return i.pkg.Name }
 // Styles
 
 var (
-	titleStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("62"))
-	crumbStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	errStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	titleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15")).Background(lipgloss.Color("62")).Padding(0, 1)
+	crumbStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	errStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 	successStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("35"))
-	helpStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Italic(true)
+	helpStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Italic(true)
 )
 
 // Model
@@ -110,10 +112,75 @@ type Model struct {
 
 func newList(width, height int) list.Model {
 	delegate := list.NewDefaultDelegate()
+	delegate.ShowDescription = false
+	delegate.SetHeight(1)
+	delegate.SetSpacing(0)
 	l := list.New(nil, delegate, width, height)
 	l.SetShowStatusBar(false)
 	l.SetFilteringEnabled(true)
-	l.Styles.Title = titleStyle
+	l.Styles.Title = titleStyle.Width(width)
+	return l
+}
+
+type twoColDelegate struct {
+	styles list.DefaultItemStyles
+}
+
+func (d twoColDelegate) Height() int                               { return 1 }
+func (d twoColDelegate) Spacing() int                              { return 0 }
+func (d twoColDelegate) Update(_ tea.Msg, _ *list.Model) tea.Cmd  { return nil }
+func (d twoColDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
+	pkg, ok := item.(packageItem)
+	if !ok || m.Width() <= 0 {
+		return
+	}
+
+	// 2 chars consumed by the left indicator (border or padding)
+	const indWidth = 2
+	avail := m.Width() - indWidth
+	if avail <= 2 {
+		return
+	}
+	col1 := avail * 3 / 5
+	col2 := avail - col1 - 1 // -1 for gap
+
+	name := ansi.Truncate(pkg.Title(), col1, "…")
+	desc := ansi.Truncate(pkg.Description(), col2, "…")
+	// pad name to fill col1 so description aligns
+	if pad := col1 - lipgloss.Width(name); pad > 0 {
+		name += strings.Repeat(" ", pad)
+	}
+
+	isSelected := index == m.Index()
+	emptyFilter := m.FilterState() == list.Filtering && m.FilterValue() == ""
+
+	var ind string
+	var nameStyle, descStyle lipgloss.Style
+	indColor := lipgloss.AdaptiveColor{Light: "#F793FF", Dark: "#AD58B4"}
+
+	switch {
+	case emptyFilter:
+		ind = "  "
+		nameStyle = d.styles.DimmedTitle.Inline(true)
+		descStyle = d.styles.DimmedDesc.Inline(true)
+	case isSelected && m.FilterState() != list.Filtering:
+		ind = lipgloss.NewStyle().Foreground(indColor).Render("│") + " "
+		nameStyle = d.styles.SelectedTitle.Inline(true)
+		descStyle = d.styles.SelectedDesc.Inline(true)
+	default:
+		ind = "  "
+		nameStyle = d.styles.NormalTitle.Inline(true)
+		descStyle = d.styles.NormalDesc.Inline(true)
+	}
+
+	fmt.Fprintf(w, "%s%s %s", ind, nameStyle.Render(name), descStyle.Render(desc))
+}
+
+func newPackageList(width, height int) list.Model {
+	l := list.New(nil, twoColDelegate{styles: list.NewDefaultItemStyles()}, width, height)
+	l.SetShowStatusBar(false)
+	l.SetFilteringEnabled(true)
+	l.Styles.Title = titleStyle.Width(width)
 	return l
 }
 
@@ -126,7 +193,7 @@ func NewModel(client *api.Client) Model {
 	vl.Title = "Versions"
 	pl := newList(0, 0)
 	pl.Title = "Projects"
-	pkl := newList(0, 0)
+	pkl := newPackageList(0, 0)
 	pkl.Title = "Packages"
 
 	return Model{
@@ -171,8 +238,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		h := max(msg.Height-8, 5)
 		m.versionList.SetSize(msg.Width, h)
+		m.versionList.Styles.Title = titleStyle.Width(msg.Width)
 		m.projectList.SetSize(msg.Width, h)
+		m.projectList.Styles.Title = titleStyle.Width(msg.Width)
 		m.packageList.SetSize(msg.Width, h)
+		m.packageList.Styles.Title = titleStyle.Width(msg.Width)
 		m.prog.Width = max(msg.Width-4, 10)
 		return m, nil
 
@@ -200,6 +270,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h := max(m.height-8, 5)
 		m.versionList = newList(m.width, h)
 		m.versionList.Title = "Versions"
+		m.versionList.Styles.Title = titleStyle.Width(m.width)
 		m.versionList.SetItems(items)
 		return m, nil
 
@@ -223,6 +294,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h := max(m.height-8, 5)
 		m.projectList = newList(m.width, h)
 		m.projectList.Title = "Projects"
+		m.projectList.Styles.Title = titleStyle.Width(m.width)
 		m.projectList.SetItems(items)
 		m.state = stateProjects
 		return m, nil
@@ -334,8 +406,9 @@ func (m Model) updateProjects(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return items[i].(packageItem).pkg.Name < items[j].(packageItem).pkg.Name
 					})
 					h := max(m.height-8, 5)
-					m.packageList = newList(m.width, h)
+					m.packageList = newPackageList(m.width, h)
 					m.packageList.Title = "Packages"
+					m.packageList.Styles.Title = titleStyle.Width(m.width)
 					m.packageList.SetItems(items)
 					m.statusMsg = ""
 					m.state = statePackages
